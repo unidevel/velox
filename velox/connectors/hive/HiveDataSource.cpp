@@ -16,6 +16,11 @@
 
 #include "velox/connectors/hive/HiveDataSource.h"
 
+#include "velox/connectors/hive/HiveConnectorSplit.h"
+#include "velox/connectors/hive/HivePartitionFunction.h"
+#include "velox/connectors/hive/IcebergSplitReader.h"
+#include "velox/connectors/hive/delta/DeltaSplitReader.h" // New include
+
 #include <fmt/ranges.h>
 #include <string>
 #include <unordered_map>
@@ -242,19 +247,71 @@ HiveDataSource::HiveDataSource(
   fsStats_ = std::make_shared<filesystems::File::IoStats>();
 }
 
-std::unique_ptr<SplitReader> HiveDataSource::createSplitReader() {
-  return SplitReader::create(
-      split_,
-      hiveTableHandle_,
-      &partitionKeys_,
-      connectorQueryCtx_,
-      hiveConfig_,
+          return std::make_unique<dwio::parquet::ParquetReader>(
+              std::move(input),
+              *readerOptions,
+              columnSelector,
+              ioExecutor_,
+              fileType);
+        });
+  }
+
+  // If the connector split is a Delta split, then use DeltaSplitReader.
+  else if (auto deltaSplit =
+          std::dynamic_pointer_cast<velox::connector::hive::delta::
+                                        HiveDeltaSplit>(split_)) {
+    return std::make_unique<delta::DeltaSplitReader>(
+        readerOutputType_,
+        split_,
+        scanSpec_,
+        preloadedFilters_,
+        fileHandleFactory_,
+        ioExecutor_,
+        hiveConfig_,
+        ioStats_,
+        fsStats_,
+        // TODO: This lambda only returns one type of reader. Will need to
+        //  dispatch to different ones depending on the file format.
+        [this](
+            std::unique_ptr<dwio::common::BufferedInput> input,
+            const std::shared_ptr<const Type>& fileType,
+            const std::shared_ptr<ColumnSelector>& columnSelector,
+            std::shared_ptr<dwio::common::ReaderOptions> readerOptions,
+            const std::shared_ptr<HiveConnectorSplit>& hiveSplit) {
+          return std::make_unique<dwio::parquet::ParquetReader>(
+              std::move(input),
+              *readerOptions,
+              columnSelector,
+              ioExecutor_,
+              fileType);
+        });
+  }
+
+  return std::make_unique<SplitReader>(
       readerOutputType_,
-      ioStats_,
-      fsStats_,
+      split_,
+      scanSpec_,
+      preloadedFilters_,
       fileHandleFactory_,
       ioExecutor_,
-      scanSpec_);
+      hiveConfig_,
+      ioStats_,
+      fsStats_,
+      // TODO: This lambda only returns one type of reader. Will need to
+      //  dispatch to different ones depending on the file format.
+      [this](
+          std::unique_ptr<dwio::common::BufferedInput> input,
+          const std::shared_ptr<const Type>& fileType,
+          const std::shared_ptr<ColumnSelector>& columnSelector,
+          std::shared_ptr<dwio::common::ReaderOptions> readerOptions,
+          const std::shared_ptr<HiveConnectorSplit>& hiveSplit) {
+        return std::make_unique<dwio::parquet::ParquetReader>(
+            std::move(input),
+            *readerOptions,
+            columnSelector,
+            ioExecutor_,
+            fileType);
+      });
 }
 
 std::vector<column_index_t> HiveDataSource::setupBucketConversion() {

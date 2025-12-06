@@ -20,6 +20,7 @@
 #include "velox/connectors/hive/HiveDataSink.h"
 #include "velox/connectors/hive/HiveDataSource.h"
 #include "velox/connectors/hive/HivePartitionFunction.h"
+#include "velox/connectors/hive/delta/HiveDeltaSplit.h"
 
 #include <boost/lexical_cast.hpp>
 #include <memory>
@@ -97,6 +98,7 @@ void HiveConnector::registerSerDe() {
   HiveBucketProperty::registerSerDe();
   HiveSortingColumn::registerSerDe();
   HivePartitionFunctionSpec::registerSerDe();
+  HiveConnector::registerSerDe<delta::HiveDeltaSplit>();
 }
 
 std::unique_ptr<core::PartitionFunction> HivePartitionFunctionSpec::create(

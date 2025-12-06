@@ -68,7 +68,13 @@ class HiveConnector : public Connector {
     return fileHandleFactory_.clearCache();
   }
 
+  // Registers SerDes for all Hive connector specific classes.
   static void registerSerDe();
+
+  template <typename T>
+  static void registerSerDe() {
+    T::registerSerDe();
+  }
 
  protected:
   const std::shared_ptr<HiveConfig> hiveConfig_;
