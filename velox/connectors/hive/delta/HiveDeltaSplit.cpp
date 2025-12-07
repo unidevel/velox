@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "velox/connectors/hive/delta/DeltaSplit.h"
+#include "velox/connectors/hive/delta/HiveDeltaSplit.h"
 
 namespace facebook::velox::connector::hive::delta {
 
@@ -48,7 +48,9 @@ HiveDeltaSplit::HiveDeltaSplit(
           infoColumns,
           properties,
           std::nullopt,
-          std::nullopt) {}
+          std::nullopt) {
+  // Delta Lake specific initialization can be added here if needed
+}
 
 } // namespace facebook::velox::connector::hive::delta
 
