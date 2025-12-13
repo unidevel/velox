@@ -15,8 +15,10 @@
  */
 
 #include "velox/connectors/hive/SplitReader.h"
+#include <cstdint>
 
 #include "velox/common/caching/CacheTTLController.h"
+#include "velox/type/DecimalUtil.h"
 #include "velox/connectors/hive/HiveConfig.h"
 #include "velox/connectors/hive/HiveConnectorSplit.h"
 #include "velox/connectors/hive/HiveConnectorUtil.h"
@@ -51,6 +53,33 @@ VectorPtr newConstantFromStringImpl(
     }
     return std::make_shared<ConstantVector<int32_t>>(
         pool, 1, false, type, std::move(days));
+  }
+
+  if (type->isDecimal()) {
+    int32_t precision, scale;
+    if (type->isLongDecimal()) {
+      precision = type->asLongDecimal().precision();
+      scale = type->asLongDecimal().scale();
+      int128_t decimalValue;
+      auto status = DecimalUtil::castFromString(
+          StringView(value.value()), precision, scale, decimalValue);
+      if (!status.ok()) {
+        VELOX_USER_FAIL("{}", status.message());
+      }
+      return std::make_shared<ConstantVector<int128_t>>(
+          pool, 1, false, type, std::move(decimalValue));
+    } else {
+      precision = type->asShortDecimal().precision();
+      scale = type->asShortDecimal().scale();
+      int64_t decimalValue;
+      auto status = DecimalUtil::castFromString(
+          StringView(value.value()), precision, scale, decimalValue);
+      if (!status.ok()) {
+        VELOX_USER_FAIL("{}", status.message());
+      }
+      return std::make_shared<ConstantVector<int64_t>>(
+          pool, 1, false, type, std::move(decimalValue));
+    }
   }
 
   if constexpr (std::is_same_v<T, StringView>) {

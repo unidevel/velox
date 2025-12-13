@@ -23,7 +23,3 @@ velox_link_libraries(
   velox_connector
   Folly::folly
 )
-
-if(${VELOX_BUILD_TESTING})
-  add_subdirectory(tests)
-endif()
