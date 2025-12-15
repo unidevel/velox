@@ -15,8 +15,10 @@
  */
 
 #include "velox/connectors/hive/SplitReader.h"
+#include <core/PlanNode.h>
 #include <functions/prestosql/types/TimestampWithTimeZoneType.h>
 #include <type/Timestamp.h>
+#include <cstddef>
 #include <cstdint>
 
 #include "velox/common/caching/CacheTTLController.h"
@@ -40,7 +42,8 @@ VectorPtr newConstantFromStringImpl(
     const std::optional<std::string>& value,
     velox::memory::MemoryPool* pool,
     bool isLocalTimestamp,
-    bool isDaysSinceEpoch) {
+    bool isDaysSinceEpoch,
+    const tz::TimeZone* timezone) {
   using T = typename TypeTraits<kind>::NativeType;
   if (!value.has_value()) {
     return std::make_shared<ConstantVector<T>>(pool, 1, true, type, T());
@@ -98,11 +101,9 @@ VectorPtr newConstantFromStringImpl(
       } else {
         auto parsed = std::move(timestampResult).value();
         Timestamp timestamp = parsed.timestamp;
-        TimeZoneKey timeZoneKey = 0;
-        if (parsed.timeZone) {
-          timeZoneKey = parsed.timeZone->id();
-        }
-        // Pack with timezone key
+        TimeZoneKey timeZoneKey = 0; // UTC_KEY
+        
+        // Pack with UTC timezone key
         int64_t packedValue = pack(timestamp, timeZoneKey);
         return std::make_shared<ConstantVector<int64_t>>(
             pool, 1, false, type, std::move(packedValue));
@@ -119,8 +120,11 @@ VectorPtr newConstantFromStringImpl(
                       VELOX_USER_FAIL("{}", status.message());
                     });
     if constexpr (kind == TypeKind::TIMESTAMP) {
-      if (isLocalTimestamp) {
-          copy.toGMT(Timestamp::defaultTimezone());
+      if (timezone) {
+        copy.toGMT(*timezone);
+      }
+      else if (isLocalTimestamp) {
+        copy.toGMT(Timestamp::defaultTimezone());
       }
     }
     return std::make_shared<ConstantVector<T>>(
@@ -134,7 +138,8 @@ VectorPtr newConstantFromString(
     const std::optional<std::string>& value,
     velox::memory::MemoryPool* pool,
     bool isLocalTimestamp,
-    bool isDaysSinceEpoch) {
+    bool isDaysSinceEpoch,
+    const tz::TimeZone* timezone) {
   return VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH_ALL(
       newConstantFromStringImpl,
       type->kind(),
@@ -142,7 +147,8 @@ VectorPtr newConstantFromString(
       value,
       pool,
       isLocalTimestamp,
-      isDaysSinceEpoch);
+      isDaysSinceEpoch,
+      timezone);
 }
 
 std::unique_ptr<SplitReader> SplitReader::create(
@@ -227,6 +233,11 @@ SplitReader::SplitReader(
       fileHandleFactory_(fileHandleFactory),
       ioExecutor_(ioExecutor),
       pool_(connectorQueryCtx->memoryPool()),
+      sessionTimezone_(
+          connectorQueryCtx->sessionTimezone().empty()
+              ? nullptr
+              : tz::locateZone(connectorQueryCtx->sessionTimezone())),
+      adjustTimestampToTimezone_(connectorQueryCtx->adjustTimestampToTimezone()),
       scanSpec_(scanSpec),
       baseReaderOpts_(connectorQueryCtx->memoryPool()),
       emptySplit_(false) {}
@@ -506,7 +517,8 @@ std::vector<TypePtr> SplitReader::adaptColumns(
           connectorQueryCtx_->memoryPool(),
           hiveConfig_->readTimestampPartitionValueAsLocalTime(
               connectorQueryCtx_->sessionProperties()),
-          false);
+          false,
+          adjustTimestampToTimezone_ ? sessionTimezone_ : nullptr);
       childSpec->setConstantValue(constant);
     } else if (
         childSpec->columnType() == common::ScanSpec::ColumnType::kRegular) {
@@ -560,7 +572,8 @@ void SplitReader::setPartitionValue(
       connectorQueryCtx_->memoryPool(),
       hiveConfig_->readTimestampPartitionValueAsLocalTime(
           connectorQueryCtx_->sessionProperties()),
-      it->second->isPartitionDateValueDaysSinceEpoch());
+      it->second->isPartitionDateValueDaysSinceEpoch(),
+      adjustTimestampToTimezone_ ? sessionTimezone_ : nullptr);
   spec->setConstantValue(constant);
 }
 
