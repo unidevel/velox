@@ -47,69 +47,67 @@ VectorPtr newConstantFromStringImpl(
     return std::make_shared<ConstantVector<T>>(pool, 1, true, type, T());
   }
 
-  if (type->isDate()) {
-    int32_t days = 0;
-    // For Iceberg, the date partition values are already in daysSinceEpoch
-    // form.
-    if (isDaysSinceEpoch) {
-      days = folly::to<int32_t>(value.value());
-    } else {
-      days = DATE()->toDays(value.value());
-    }
-    return std::make_shared<ConstantVector<int32_t>>(
-        pool, 1, false, type, std::move(days));
-  }
-
-  if (type->isDecimal()) {
-    int32_t precision, scale;
-    if (type->isLongDecimal()) {
-      precision = type->asLongDecimal().precision();
-      scale = type->asLongDecimal().scale();
-      int128_t decimalValue;
-      auto status = DecimalUtil::castFromString(
-          StringView(value.value()), precision, scale, decimalValue);
-      if (!status.ok()) {
-        VELOX_USER_FAIL("{}", status.message());
+  // Handle Date type (uses INTEGER kind but has special semantics)
+  if constexpr (kind == TypeKind::INTEGER) {
+    if (type->isDate()) {
+      int32_t days = 0;
+      // For Iceberg, the date partition values are already in daysSinceEpoch
+      // form.
+      if (isDaysSinceEpoch) {
+        days = folly::to<int32_t>(value.value());
+      } else {
+        days = DATE()->toDays(value.value());
       }
-      return std::make_shared<ConstantVector<int128_t>>(
-          pool, 1, false, type, std::move(decimalValue));
-    } else {
-      precision = type->asShortDecimal().precision();
-      scale = type->asShortDecimal().scale();
-      int64_t decimalValue;
-      auto status = DecimalUtil::castFromString(
-          StringView(value.value()), precision, scale, decimalValue);
-      if (!status.ok()) {
-        VELOX_USER_FAIL("{}", status.message());
-      }
-      return std::make_shared<ConstantVector<int64_t>>(
-          pool, 1, false, type, std::move(decimalValue));
+      return std::make_shared<ConstantVector<int32_t>>(
+          pool, 1, false, type, std::move(days));
     }
   }
 
-  if (isTimestampWithTimeZoneType(type)) {
-    // Append " UTC" to the timestamp string for proper timezone parsing
-    // std::string timestampWithUtc = value.value() + "Z-7";
-    auto timestampResult = util::fromTimestampWithTimezoneString(
-        StringView(value.value()), util::TimestampParseMode::kSparkCast);
-    if (timestampResult.hasError()) {
-      // If BIGINT and not a timestamp string, fall through to normal handling
-      if (type->isBigint()) {
+  // Handle Decimal types (uses HUGEINT kind for long decimal, BIGINT for short)
+  if constexpr (kind == TypeKind::HUGEINT || kind == TypeKind::BIGINT) {
+    if (type->isDecimal()) {
+      int32_t precision, scale;
+      if (type->isLongDecimal()) {
+        precision = type->asLongDecimal().precision();
+        scale = type->asLongDecimal().scale();
+        int128_t decimalValue;
+        auto status = DecimalUtil::castFromString(
+            StringView(value.value()), precision, scale, decimalValue);
+        if (!status.ok()) {
+          VELOX_USER_FAIL("{}", status.message());
+        }
+        return std::make_shared<ConstantVector<int128_t>>(
+            pool, 1, false, type, std::move(decimalValue));
+      } else {
+        precision = type->asShortDecimal().precision();
+        scale = type->asShortDecimal().scale();
+        int64_t decimalValue;
+        auto status = DecimalUtil::castFromString(
+            StringView(value.value()), precision, scale, decimalValue);
+        if (!status.ok()) {
+          VELOX_USER_FAIL("{}", status.message());
+        }
+        return std::make_shared<ConstantVector<int64_t>>(
+            pool, 1, false, type, std::move(decimalValue));
+      }
+    }
+    else if (isTimestampWithTimeZoneType(type)) {
+      auto timestampResult = util::fromTimestampWithTimezoneString(
+          StringView(value.value()), util::TimestampParseMode::kSparkCast);
+      if (timestampResult.hasError()) {
         // Fall through to normal BIGINT handling below
       } else {
-        VELOX_USER_FAIL("{}", timestampResult.error().message());
+        auto parsed = std::move(timestampResult).value();
+        Timestamp timestamp = parsed.timestamp;
+        TimeZoneKey timeZoneKey = 0;
+        if (parsed.timeZone) {
+          timeZoneKey = parsed.timeZone->id();
+        }
+        // Pack with timezone key
+        int64_t packedValue = pack(timestamp, timeZoneKey);
+        return std::make_shared<ConstantVector<int64_t>>(
+            pool, 1, false, type, std::move(packedValue));
       }
-    } else if (type->isBigint()) {
-      auto parsed = std::move(timestampResult).value();
-      Timestamp timestamp = parsed.timestamp;
-      TimeZoneKey timeZoneKey = 0;
-      if ( parsed.timeZone ) {
-        timeZoneKey = parsed.timeZone->id();
-      }
-      // Pack with UTC timezone key (0)
-      int64_t packedValue = pack(timestamp, timeZoneKey);
-      return std::make_shared<ConstantVector<int64_t>>(
-          pool, 1, false, type, std::move(packedValue));
     }
   }
 
