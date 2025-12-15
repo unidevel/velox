@@ -15,11 +15,15 @@
  */
 
 #include "velox/connectors/hive/SplitReader.h"
+#include <functions/prestosql/types/TimestampWithTimeZoneType.h>
+#include <type/Timestamp.h>
 #include <cstdint>
 
 #include "velox/common/caching/CacheTTLController.h"
 #include "velox/connectors/hive/BufferedInputBuilder.h"
 #include "velox/type/DecimalUtil.h"
+#include "velox/type/TimestampConversion.h"
+#include "velox/type/tz/TimeZoneMap.h"
 #include "velox/connectors/hive/HiveConfig.h"
 #include "velox/connectors/hive/HiveConnectorSplit.h"
 #include "velox/connectors/hive/HiveConnectorUtil.h"
@@ -83,6 +87,32 @@ VectorPtr newConstantFromStringImpl(
     }
   }
 
+  if (isTimestampWithTimeZoneType(type)) {
+    // Append " UTC" to the timestamp string for proper timezone parsing
+    // std::string timestampWithUtc = value.value() + "Z-7";
+    auto timestampResult = util::fromTimestampWithTimezoneString(
+        StringView(value.value()), util::TimestampParseMode::kSparkCast);
+    if (timestampResult.hasError()) {
+      // If BIGINT and not a timestamp string, fall through to normal handling
+      if (type->isBigint()) {
+        // Fall through to normal BIGINT handling below
+      } else {
+        VELOX_USER_FAIL("{}", timestampResult.error().message());
+      }
+    } else if (type->isBigint()) {
+      auto parsed = std::move(timestampResult).value();
+      Timestamp timestamp = parsed.timestamp;
+      TimeZoneKey timeZoneKey = 0;
+      if ( parsed.timeZone ) {
+        timeZoneKey = parsed.timeZone->id();
+      }
+      // Pack with UTC timezone key (0)
+      int64_t packedValue = pack(timestamp, timeZoneKey);
+      return std::make_shared<ConstantVector<int64_t>>(
+          pool, 1, false, type, std::move(packedValue));
+    }
+  }
+
   if constexpr (std::is_same_v<T, StringView>) {
     return std::make_shared<ConstantVector<StringView>>(
         pool, 1, false, type, StringView(value.value()));
@@ -93,7 +123,7 @@ VectorPtr newConstantFromStringImpl(
                     });
     if constexpr (kind == TypeKind::TIMESTAMP) {
       if (isLocalTimestamp) {
-        copy.toGMT(Timestamp::defaultTimezone());
+          copy.toGMT(Timestamp::defaultTimezone());
       }
     }
     return std::make_shared<ConstantVector<T>>(
