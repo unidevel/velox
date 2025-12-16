@@ -58,20 +58,12 @@ void DeltaSplitReader::prepareSplit(
   }
   auto rowType = getAdaptedRowType();
 
-  LOG(INFO) << "DeltaSplitReader::prepareSplit - adapted rowType: " << rowType->toString();
-  LOG(INFO) << "  rowType children count: " << rowType->size();
-  for (size_t i = 0; i < rowType->size(); ++i) {
-    LOG(INFO) << "    rowType[" << i << "]: " << rowType->nameOf(i) << " : " << rowType->childAt(i)->toString();
-  }
-
   if (checkIfSplitIsEmpty(runtimeStats)) {
     VELOX_CHECK(emptySplit_);
     return;
   }
 
-  LOG(INFO) << "DeltaSplitReader::prepareSplit - calling createRowReader";
   createRowReader(std::move(metadataFilter), std::move(rowType), std::nullopt);
-  LOG(INFO) << "DeltaSplitReader::prepareSplit - createRowReader completed";
 }
 
 uint64_t DeltaSplitReader::next(uint64_t size, VectorPtr& output) {
@@ -95,23 +87,12 @@ std::vector<TypePtr> DeltaSplitReader::adaptColumns(
   std::vector<TypePtr> columnTypes = fileType->children();
   auto& childrenSpecs = scanSpec_->children();
 
-  LOG(INFO) << "DeltaSplitReader::adaptColumns called";
-  LOG(INFO) << "  fileType: " << fileType->toString();
-  LOG(INFO) << "  fileType children count: " << fileType->size();
-  LOG(INFO) << "  tableSchema: " << (tableSchema ? tableSchema->toString() : "null");
-  LOG(INFO) << "  scanSpec children count: " << childrenSpecs.size();
-  LOG(INFO) << "  partitionKeys count: " << hiveSplit_->partitionKeys.size();
-
   for (const auto& childSpec : childrenSpecs) {
     const std::string& fieldName = childSpec->fieldName();
-    LOG(INFO) << "  Processing column: " << fieldName
-              << ", columnType: " << static_cast<int>(childSpec->columnType())
-              << ", subscript: " << childSpec->subscript();
 
     if (auto iter = hiveSplit_->infoColumns.find(fieldName);
         iter != hiveSplit_->infoColumns.end()) {
       // Handle info columns (e.g., $path, $file_size)
-      LOG(INFO) << "    -> Info column";
       auto infoColumnType = readerOutputType_->findChild(fieldName);
       auto constant = newConstantFromString(
           infoColumnType,
@@ -123,27 +104,27 @@ std::vector<TypePtr> DeltaSplitReader::adaptColumns(
           adjustTimestampToTimezone_ ? sessionTimezone_ : nullptr);
       childSpec->setConstantValue(constant);
     } else {
-      auto fileTypeIdx = fileType->getChildIdxIfExists(fieldName);
-      auto outputTypeIdx = readerOutputType_->getChildIdxIfExists(fieldName);
-      LOG(INFO) << "    -> fileTypeIdx: " << (fileTypeIdx.has_value() ? std::to_string(*fileTypeIdx) : "not found")
-                << ", outputTypeIdx: " << (outputTypeIdx.has_value() ? std::to_string(*outputTypeIdx) : "not found");
+      // Check if this is a partition column first
+      if (auto it = hiveSplit_->partitionKeys.find(fieldName);
+          it != hiveSplit_->partitionKeys.end()) {
+        // Partition column - set constant value from partition metadata
+        // Partition columns should never be in the file
+        setPartitionValue(childSpec.get(), fieldName, it->second);
+      } else {
+        // Not a partition column - check if it exists in the file
+        auto fileTypeIdx = fileType->getChildIdxIfExists(fieldName);
+        auto outputTypeIdx = readerOutputType_->getChildIdxIfExists(fieldName);
 
-      if (outputTypeIdx.has_value() && fileTypeIdx.has_value()) {
-        // Column exists in both file and output - read from file
-        LOG(INFO) << "    -> Column in file and output, clearing constant";
-        childSpec->setConstantValue(nullptr);
-        auto& outputType = readerOutputType_->childAt(*outputTypeIdx);
-        columnTypes[*fileTypeIdx] = outputType;
-      } else if (!fileTypeIdx.has_value()) {
-        // Column missing from file - could be partition column or schema evolution
-        if (auto it = hiveSplit_->partitionKeys.find(fieldName);
-            it != hiveSplit_->partitionKeys.end()) {
-          // Partition column - set constant value from partition metadata
-          LOG(INFO) << "    -> Partition column, setting constant value";
-          setPartitionValue(childSpec.get(), fieldName, it->second);
-        } else {
-          // Schema evolution - column added after file was written
-          LOG(INFO) << "    -> Schema evolution, setting NULL constant";
+        if (outputTypeIdx.has_value() && fileTypeIdx.has_value()) {
+          // Column exists in both file and output - read from file
+          // Clear any placeholder constant that may have been set
+          if (childSpec->isConstant()) {
+            childSpec->setConstantValue(nullptr);
+          }
+          auto& outputType = readerOutputType_->childAt(*outputTypeIdx);
+          columnTypes[*fileTypeIdx] = outputType;
+        } else if (!fileTypeIdx.has_value()) {
+          // Column missing from file - schema evolution case
           VELOX_CHECK(tableSchema, "Unable to resolve column '{}'", fieldName);
           childSpec->setConstantValue(
               BaseVector::createNullConstant(
@@ -152,15 +133,11 @@ std::vector<TypePtr> DeltaSplitReader::adaptColumns(
                   connectorQueryCtx_->memoryPool()));
         }
       }
-    }
+  }
   }
 
-  scanSpec_->resetCachedValues(false);
-
-  LOG(INFO) << "  Returning columnTypes with size: " << columnTypes.size();
-  for (size_t i = 0; i < columnTypes.size(); ++i) {
-    LOG(INFO) << "    columnTypes[" << i << "]: " << columnTypes[i]->toString();
-  }
+  // Don't reset cached values as it may clear the partition column constants
+  // scanSpec_->resetCachedValues(false);
 
   return columnTypes;
 }

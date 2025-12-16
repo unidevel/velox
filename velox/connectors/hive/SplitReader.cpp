@@ -434,7 +434,9 @@ void SplitReader::createReader(
 
 RowTypePtr SplitReader::getAdaptedRowType() const {
   auto& fileType = baseReader_->rowType();
-  auto columnTypes = adaptColumns(fileType, baseReaderOpts_.fileSchema());
+  // Pass readerOutputType_ which contains all columns (data + partition)
+  // instead of fileSchema which only contains data columns from the file
+  auto columnTypes = adaptColumns(fileType, readerOutputType_);
   auto columnNames = fileType->names();
   return ROW(std::move(columnNames), std::move(columnTypes));
 }
@@ -575,6 +577,9 @@ void SplitReader::setPartitionValue(
           connectorQueryCtx_->sessionProperties()),
       it->second->isPartitionDateValueDaysSinceEpoch(),
       adjustTimestampToTimezone_ ? sessionTimezone_ : nullptr);
+  // Replace the placeholder null constant with the actual partition value.
+  // The column was already marked as constant in makeScanSpec to prevent
+  // child reader creation.
   spec->setConstantValue(constant);
 }
 
