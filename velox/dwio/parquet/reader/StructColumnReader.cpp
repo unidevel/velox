@@ -34,8 +34,10 @@ StructColumnReader::StructColumnReader(
     common::ScanSpec& scanSpec)
     : SelectiveStructColumnReader(requestedType, fileType, params, scanSpec) {
   auto& childSpecs = scanSpec_->stableChildren();
+  
   for (auto i = 0; i < childSpecs.size(); ++i) {
     auto childSpec = childSpecs[i];
+    
     if (childSpec->isConstant() || isChildMissing(*childSpec)) {
       childSpec->setSubscript(kConstantChildSpecSubscript);
       continue;
