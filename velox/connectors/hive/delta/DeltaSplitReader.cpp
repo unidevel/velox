@@ -83,7 +83,8 @@ uint64_t DeltaSplitReader::next(uint64_t size, VectorPtr& output) {
 
 std::vector<TypePtr> DeltaSplitReader::adaptColumns(
     const RowTypePtr& fileType,
-    const RowTypePtr& tableSchema) const {
+    const RowTypePtr& _) const {
+  auto tableSchema = readerOutputType_;
   std::vector<TypePtr> columnTypes = fileType->children();
   auto& childrenSpecs = scanSpec_->children();
 

@@ -390,23 +390,10 @@ std::shared_ptr<common::ScanSpec> makeScanSpec(
           ->setColumnType(common::ScanSpec::ColumnType::kRowIndex);
       continue;
     }
-    
-    // Check if this is a partition key column
-    auto isPartitionKey = partitionKeys.find(name) != partitionKeys.end();
-    
     auto it = outputSubfields.find(name);
     if (it == outputSubfields.end()) {
       auto* fieldSpec = spec->addFieldRecursively(name, *type, i);
-      
-      // For partition keys: set as constant immediately so the reader knows not to
-      // create child readers. The actual constant value will be set later in adaptColumns.
-      if (!isPartitionKey) {
-        processFieldSpec(dataColumns, type, *fieldSpec);
-      } else {
-        // Set a placeholder null constant to mark this as a constant column.
-        // The actual partition value will be set later in adaptColumns/setPartitionValue.
-        fieldSpec->setConstantValue(BaseVector::createNullConstant(type, 1, pool));
-      }
+      processFieldSpec(dataColumns, type, *fieldSpec);
       filterSubfields.erase(name);
       continue;
     }
@@ -422,13 +409,7 @@ std::shared_ptr<common::ScanSpec> makeScanSpec(
     }
     auto* fieldSpec = spec->addField(name, i);
     addSubfields(*type, subfieldSpecs, 1, pool, *fieldSpec);
-    
-    // For partition keys: set as constant immediately
-    if (!isPartitionKey) {
-      processFieldSpec(dataColumns, type, *fieldSpec);
-    } else {
-      fieldSpec->setProjectOut(false);
-    }
+    processFieldSpec(dataColumns, type, *fieldSpec);
     subfieldSpecs.clear();
   }
 

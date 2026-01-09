@@ -434,9 +434,7 @@ void SplitReader::createReader(
 
 RowTypePtr SplitReader::getAdaptedRowType() const {
   auto& fileType = baseReader_->rowType();
-  // Pass readerOutputType_ which contains all columns (data + partition)
-  // instead of fileSchema which only contains data columns from the file
-  auto columnTypes = adaptColumns(fileType, readerOutputType_);
+  auto columnTypes = adaptColumns(fileType, baseReaderOpts_.fileSchema());
   auto columnNames = fileType->names();
   return ROW(std::move(columnNames), std::move(columnTypes));
 }
