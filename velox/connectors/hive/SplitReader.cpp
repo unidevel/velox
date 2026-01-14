@@ -15,13 +15,22 @@
  */
 
 #include "velox/connectors/hive/SplitReader.h"
+#include <core/PlanNode.h>
+#include <functions/prestosql/types/TimestampWithTimeZoneType.h>
+#include <type/Timestamp.h>
+#include <cstddef>
+#include <cstdint>
 
 #include "velox/common/caching/CacheTTLController.h"
 #include "velox/connectors/hive/BufferedInputBuilder.h"
+#include "velox/type/DecimalUtil.h"
+#include "velox/type/TimestampConversion.h"
+#include "velox/type/tz/TimeZoneMap.h"
 #include "velox/connectors/hive/HiveConfig.h"
 #include "velox/connectors/hive/HiveConnectorSplit.h"
 #include "velox/connectors/hive/HiveConnectorUtil.h"
 #include "velox/connectors/hive/TableHandle.h"
+#include "velox/connectors/hive/delta/DeltaSplitReader.h"
 #include "velox/connectors/hive/iceberg/IcebergSplitReader.h"
 #include "velox/dwio/common/ReaderFactory.h"
 
@@ -34,23 +43,73 @@ VectorPtr newConstantFromStringImpl(
     const std::optional<std::string>& value,
     velox::memory::MemoryPool* pool,
     bool isLocalTimestamp,
-    bool isDaysSinceEpoch) {
+    bool isDaysSinceEpoch,
+    const tz::TimeZone* timezone) {
   using T = typename TypeTraits<kind>::NativeType;
   if (!value.has_value()) {
     return std::make_shared<ConstantVector<T>>(pool, 1, true, type, T());
   }
 
-  if (type->isDate()) {
-    int32_t days = 0;
-    // For Iceberg, the date partition values are already in daysSinceEpoch
-    // form.
-    if (isDaysSinceEpoch) {
-      days = folly::to<int32_t>(value.value());
-    } else {
-      days = DATE()->toDays(value.value());
+  // Handle Date type (uses INTEGER kind but has special semantics)
+  if constexpr (kind == TypeKind::INTEGER) {
+    if (type->isDate()) {
+      int32_t days = 0;
+      // For Iceberg, the date partition values are already in daysSinceEpoch
+      // form.
+      if (isDaysSinceEpoch) {
+        days = folly::to<int32_t>(value.value());
+      } else {
+        days = DATE()->toDays(value.value());
+      }
+      return std::make_shared<ConstantVector<int32_t>>(
+          pool, 1, false, type, std::move(days));
     }
-    return std::make_shared<ConstantVector<int32_t>>(
-        pool, 1, false, type, std::move(days));
+  }
+
+  // Handle Decimal types (uses HUGEINT kind for long decimal, BIGINT for short)
+  if constexpr (kind == TypeKind::HUGEINT || kind == TypeKind::BIGINT) {
+    if (type->isDecimal()) {
+      int32_t precision, scale;
+      if (type->isLongDecimal()) {
+        precision = type->asLongDecimal().precision();
+        scale = type->asLongDecimal().scale();
+        int128_t decimalValue;
+        auto status = DecimalUtil::castFromString(
+            StringView(value.value()), precision, scale, decimalValue);
+        if (!status.ok()) {
+          VELOX_USER_FAIL("{}", status.message());
+        }
+        return std::make_shared<ConstantVector<int128_t>>(
+            pool, 1, false, type, std::move(decimalValue));
+      } else {
+        precision = type->asShortDecimal().precision();
+        scale = type->asShortDecimal().scale();
+        int64_t decimalValue;
+        auto status = DecimalUtil::castFromString(
+            StringView(value.value()), precision, scale, decimalValue);
+        if (!status.ok()) {
+          VELOX_USER_FAIL("{}", status.message());
+        }
+        return std::make_shared<ConstantVector<int64_t>>(
+            pool, 1, false, type, std::move(decimalValue));
+      }
+    }
+    else if (isTimestampWithTimeZoneType(type)) {
+      auto timestampResult = util::fromTimestampWithTimezoneString(
+          StringView(value.value()), util::TimestampParseMode::kSparkCast);
+      if (timestampResult.hasError()) {
+        // Fall through to normal BIGINT handling below
+      } else {
+        auto parsed = std::move(timestampResult).value();
+        Timestamp timestamp = parsed.timestamp;
+        TimeZoneKey timeZoneKey = 0; // UTC_KEY
+
+        // Pack with UTC timezone key
+        int64_t packedValue = pack(timestamp, timeZoneKey);
+        return std::make_shared<ConstantVector<int64_t>>(
+            pool, 1, false, type, std::move(packedValue));
+      }
+    }
   }
 
   if constexpr (std::is_same_v<T, StringView>) {
@@ -62,7 +121,10 @@ VectorPtr newConstantFromStringImpl(
                       VELOX_USER_FAIL("{}", status.message());
                     });
     if constexpr (kind == TypeKind::TIMESTAMP) {
-      if (isLocalTimestamp) {
+      if (timezone) {
+        copy.toGMT(*timezone);
+      }
+      else if (isLocalTimestamp) {
         copy.toGMT(Timestamp::defaultTimezone());
       }
     }
@@ -77,7 +139,8 @@ VectorPtr newConstantFromString(
     const std::optional<std::string>& value,
     velox::memory::MemoryPool* pool,
     bool isLocalTimestamp,
-    bool isDaysSinceEpoch) {
+    bool isDaysSinceEpoch,
+    const tz::TimeZone* timezone) {
   return VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH_ALL(
       newConstantFromStringImpl,
       type->kind(),
@@ -85,7 +148,8 @@ VectorPtr newConstantFromString(
       value,
       pool,
       isLocalTimestamp,
-      isDaysSinceEpoch);
+      isDaysSinceEpoch,
+      timezone);
 }
 
 std::unique_ptr<SplitReader> SplitReader::create(
@@ -101,34 +165,50 @@ std::unique_ptr<SplitReader> SplitReader::create(
     folly::Executor* ioExecutor,
     const std::shared_ptr<common::ScanSpec>& scanSpec) {
   //  Create the SplitReader based on hiveSplit->customSplitInfo["table_format"]
-  if (hiveSplit->customSplitInfo.count("table_format") > 0 &&
-      hiveSplit->customSplitInfo["table_format"] == "hive-iceberg") {
-    return std::make_unique<iceberg::IcebergSplitReader>(
-        hiveSplit,
-        hiveTableHandle,
-        partitionKeys,
-        connectorQueryCtx,
-        hiveConfig,
-        readerOutputType,
-        ioStats,
-        fsStats,
-        fileHandleFactory,
-        ioExecutor,
-        scanSpec);
-  } else {
-    return std::unique_ptr<SplitReader>(new SplitReader(
-        hiveSplit,
-        hiveTableHandle,
-        partitionKeys,
-        connectorQueryCtx,
-        hiveConfig,
-        readerOutputType,
-        ioStats,
-        fsStats,
-        fileHandleFactory,
-        ioExecutor,
-        scanSpec));
+  if (hiveSplit->customSplitInfo.count("table_format") > 0) {
+    const auto& tableFormat = hiveSplit->customSplitInfo.at("table_format");
+    if (tableFormat == "hive-iceberg") {
+      return std::make_unique<iceberg::IcebergSplitReader>(
+          hiveSplit,
+          hiveTableHandle,
+          partitionKeys,
+          connectorQueryCtx,
+          hiveConfig,
+          readerOutputType,
+          ioStats,
+          fsStats,
+          fileHandleFactory,
+          ioExecutor,
+          scanSpec);
+    } else if (tableFormat == "hive-delta") {
+      return std::make_unique<delta::DeltaSplitReader>(
+          hiveSplit,
+          hiveTableHandle,
+          partitionKeys,
+          connectorQueryCtx,
+          hiveConfig,
+          readerOutputType,
+          ioStats,
+          fsStats,
+          fileHandleFactory,
+          ioExecutor,
+          scanSpec);
+    }
   }
+
+  // Default to base SplitReader for regular Hive tables
+  return std::unique_ptr<SplitReader>(new SplitReader(
+      hiveSplit,
+      hiveTableHandle,
+      partitionKeys,
+      connectorQueryCtx,
+      hiveConfig,
+      readerOutputType,
+      ioStats,
+      fsStats,
+      fileHandleFactory,
+      ioExecutor,
+      scanSpec));
 }
 
 SplitReader::SplitReader(
@@ -154,6 +234,11 @@ SplitReader::SplitReader(
       fileHandleFactory_(fileHandleFactory),
       ioExecutor_(ioExecutor),
       pool_(connectorQueryCtx->memoryPool()),
+      sessionTimezone_(
+          connectorQueryCtx->sessionTimezone().empty()
+              ? nullptr
+              : tz::locateZone(connectorQueryCtx->sessionTimezone())),
+      adjustTimestampToTimezone_(connectorQueryCtx->adjustTimestampToTimezone()),
       scanSpec_(scanSpec),
       baseReaderOpts_(connectorQueryCtx->memoryPool()),
       emptySplit_(false) {}
@@ -433,19 +518,26 @@ std::vector<TypePtr> SplitReader::adaptColumns(
           connectorQueryCtx_->memoryPool(),
           hiveConfig_->readTimestampPartitionValueAsLocalTime(
               connectorQueryCtx_->sessionProperties()),
-          false);
+          false,
+          adjustTimestampToTimezone_ ? sessionTimezone_ : nullptr);
       childSpec->setConstantValue(constant);
     } else if (
         childSpec->columnType() == common::ScanSpec::ColumnType::kRegular) {
       auto fileTypeIdx = fileType->getChildIdxIfExists(fieldName);
       if (!fileTypeIdx.has_value()) {
         // Column is missing. Most likely due to schema evolution.
-        VELOX_CHECK(tableSchema, "Unable to resolve column '{}'", fieldName);
+        auto outputTypeIdx = readerOutputType_->getChildIdxIfExists(fieldName);
+        TypePtr fieldType;
+        if (outputTypeIdx.has_value()) {
+          // Field name exists in the user-specified output type.
+          fieldType = readerOutputType_->childAt(outputTypeIdx.value());
+        } else {
+          VELOX_CHECK(tableSchema, "Unable to resolve column '{}'", fieldName);
+          fieldType = tableSchema->findChild(fieldName);
+        }
         childSpec->setConstantValue(
             BaseVector::createNullConstant(
-                tableSchema->findChild(fieldName),
-                1,
-                connectorQueryCtx_->memoryPool()));
+                fieldType, 1, connectorQueryCtx_->memoryPool()));
       } else {
         // Column no longer missing, reset constant value set on the spec.
         childSpec->setConstantValue(nullptr);
@@ -487,7 +579,11 @@ void SplitReader::setPartitionValue(
       connectorQueryCtx_->memoryPool(),
       hiveConfig_->readTimestampPartitionValueAsLocalTime(
           connectorQueryCtx_->sessionProperties()),
-      it->second->isPartitionDateValueDaysSinceEpoch());
+      it->second->isPartitionDateValueDaysSinceEpoch(),
+      adjustTimestampToTimezone_ ? sessionTimezone_ : nullptr);
+  // Replace the placeholder null constant with the actual partition value.
+  // The column was already marked as constant in makeScanSpec to prevent
+  // child reader creation.
   spec->setConstantValue(constant);
 }
 
