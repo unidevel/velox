@@ -1,0 +1,1 @@
+{"id":"5b175954-e878-4a9c-8abe-36e2410e1857","ts":"2026-02-19T04:59:49.184Z","version":"1.0.2","toolName":"apply_diff","taskID":"3d3566f4-4d37-4000-babb-d2d75381fcf9","path":"velox/connectors/hive/SplitReader.cpp","numLinesApplied":2,"currentRange":{"startLine":33,"endLine":34}}
