@@ -205,6 +205,8 @@ Writer::Writer(
   } else {
     writer_ = options.columnWriterFactory(writerBase_->getContext(), *schema_);
   }
+  dataFileStats_ = std::make_shared<dwio::common::DataFileStatistics>();
+  statsCollector_ = options.fileStatsCollector;
   setState(State::kRunning);
 }
 
@@ -807,7 +809,10 @@ std::unique_ptr<dwio::common::FileMetadata> Writer::close() {
   });
   flushInternal(true);
   writerBase_->close();
-  return std::make_unique<DwrfFileMetadata>();
+  auto footer = FooterWrapper(getFooter()->getDwrfPtr());
+  dataFileStats_->numRecords = footer.numberOfRows();
+  auto fileMetadata = std::make_unique<DwrfFileMetadata>(footer);
+  return fileMetadata;
 }
 
 void Writer::abort() {

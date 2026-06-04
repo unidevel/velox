@@ -31,8 +31,19 @@
 
 namespace facebook::velox::dwrf {
 
-/// DWRF-specific file metadata wrapper. Currently a placeholder.
-class DwrfFileMetadata : public dwio::common::FileMetadata {};
+/// DWRF-specific file metadata wrapper carrying footer metadata for
+/// post-close statistics collection.
+class DwrfFileMetadata : public dwio::common::FileMetadata {
+ public:
+  explicit DwrfFileMetadata(FooterWrapper footer) : footer_(footer) {}
+
+  const FooterWrapper& footer() const {
+    return footer_;
+  }
+
+ private:
+  FooterWrapper footer_;
+};
 
 struct WriterOptions : public dwio::common::WriterOptions {
   std::shared_ptr<const Config> config = std::make_shared<Config>();
