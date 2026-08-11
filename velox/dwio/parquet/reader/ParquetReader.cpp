@@ -28,6 +28,7 @@
 #include "velox/dwio/parquet/reader/ParquetColumnReader.h"
 #include "velox/dwio/parquet/reader/ParquetStatsContext.h"
 #include "velox/dwio/parquet/reader/StructColumnReader.h"
+#include "velox/dwio/parquet/reader/VariantColumnReader.h"
 #include "velox/dwio/parquet/thrift/ParquetThrift.h"
 #include "velox/functions/lib/string/StringImpl.h"
 #include "velox/functions/prestosql/types/TimestampWithTimeZoneType.h"
@@ -124,6 +125,37 @@ void skipParquetSchemaNode(
           columnNames);
     }
   }
+}
+
+// A variant is stored as a group of two binary fields, 'value' and 'metadata'
+// (see
+// https://github.com/apache/parquet-format/blob/master/VariantEncoding.md).
+// Returns true if the node at 'schemaIdx' is such a group. Engines that have no
+// variant type, like Presto reading Delta Lake, request the JSON text of the
+// variant, so the requested type is a string where the file has a group.
+bool isVariantGroup(
+    const std::vector<thrift::SchemaElement>& schema,
+    uint32_t schemaIdx) {
+  const auto& schemaElement = schema[schemaIdx];
+  if (schemaElement.type() || schemaElement.num_children().value_or(0) != 2) {
+    return false;
+  }
+  bool hasValue = false;
+  bool hasMetadata = false;
+  for (uint32_t i = schemaIdx + 1; i <= schemaIdx + 2; ++i) {
+    if (i >= schema.size()) {
+      return false;
+    }
+    const auto& field = schema[i];
+    // Both fields are unannotated binary leaves.
+    if (!field.type() || *field.type() != thrift::Type::BYTE_ARRAY ||
+        field.logicalType().has_value() || field.converted_type().has_value()) {
+      return false;
+    }
+    hasValue |= *field.name() == VariantColumnReader::kValueField;
+    hasMetadata |= *field.name() == VariantColumnReader::kMetadataField;
+  }
+  return hasValue && hasMetadata;
 }
 
 // An unannotated array in Parquet is a repeated field that is not explicitly
@@ -340,6 +372,19 @@ class ReaderBase {
       const TypePtr& requestedType,
       const TypePtr& parentRequestedType,
       const ParquetFieldId* requestedFieldIds,
+      std::vector<std::string>& columnNames) const;
+
+  // Builds the type info of the variant group at 'schemaIdx', see
+  // isVariantGroup(). Its two binary fields are always read by physical name
+  // because the group is opaque to the requested schema and to column mapping:
+  // the engine requests a single JSON column in its place.
+  std::unique_ptr<ParquetTypeWithId> getVariantColumnInfo(
+      uint32_t maxSchemaElementIdx,
+      uint32_t maxRepeat,
+      uint32_t maxDefine,
+      uint32_t& schemaIdx,
+      uint32_t& columnIdx,
+      bool isOptional,
       std::vector<std::string>& columnNames) const;
 
   TypePtr convertType(
@@ -610,6 +655,22 @@ std::unique_ptr<ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
     VELOX_CHECK(
         schemaElement.num_children() && *schemaElement.num_children() > 0,
         "Node has no children but should");
+
+    // A variant read as JSON text is the one case of a group node with a scalar
+    // requested type. Its subtree is read as is and decoded in
+    // VariantColumnReader.
+    if (requestedType && requestedType->kind() == TypeKind::VARCHAR &&
+        isVariantGroup(schema, curSchemaIdx)) {
+      return getVariantColumnInfo(
+          maxSchemaElementIdx,
+          maxRepeat,
+          maxDefine,
+          schemaIdx,
+          columnIdx,
+          isOptional,
+          columnNames);
+    }
+
     VELOX_CHECK(
         !requestedType || requestedType->isRow() || requestedType->isArray() ||
         requestedType->isMap());
@@ -1091,6 +1152,62 @@ std::unique_ptr<ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
 
   VELOX_FAIL("Unable to extract Parquet column info.");
   return nullptr;
+}
+
+std::unique_ptr<ParquetTypeWithId> ReaderBase::getVariantColumnInfo(
+    uint32_t maxSchemaElementIdx,
+    uint32_t maxRepeat,
+    uint32_t maxDefine,
+    uint32_t& schemaIdx,
+    uint32_t& columnIdx,
+    bool isOptional,
+    std::vector<std::string>& columnNames) const {
+  const auto& schema = *fileMetaData_->schema();
+  const uint32_t groupSchemaIdx = schemaIdx;
+  const auto numFields = *schema[groupSchemaIdx].num_children();
+
+  std::vector<std::string> fieldNames;
+  std::vector<TypePtr> fieldTypes;
+  std::vector<std::unique_ptr<dwio::common::TypeWithId>> fields;
+  for (int32_t i = 0; i < numFields; ++i) {
+    ++schemaIdx;
+    const auto& field = schema[schemaIdx];
+    const bool isFieldOptional =
+        *field.repetition_type() != thrift::FieldRepetitionType::REQUIRED;
+    columnNames.push_back(*field.name());
+    fieldNames.push_back(*field.name());
+    fieldTypes.push_back(VARBINARY());
+    fields.push_back(
+        std::make_unique<ParquetTypeWithId>(
+            VARBINARY(),
+            std::vector<std::unique_ptr<dwio::common::TypeWithId>>{},
+            schemaIdx,
+            maxSchemaElementIdx,
+            columnIdx++,
+            *field.name(),
+            *field.type(),
+            std::nullopt,
+            std::nullopt,
+            maxRepeat,
+            maxDefine + (isFieldOptional ? 1 : 0),
+            isFieldOptional,
+            /*isRepeated=*/false));
+  }
+
+  return std::make_unique<ParquetTypeWithId>(
+      ROW(std::move(fieldNames), std::move(fieldTypes)),
+      std::move(fields),
+      groupSchemaIdx,
+      maxSchemaElementIdx,
+      ParquetTypeWithId::kNonLeaf,
+      columnNames.at(groupSchemaIdx),
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      maxRepeat,
+      maxDefine,
+      isOptional,
+      /*isRepeated=*/false);
 }
 
 TypePtr ReaderBase::convertType(

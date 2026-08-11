@@ -21,7 +21,6 @@
 #include "velox/dwio/parquet/reader/ParquetColumnReader.h"
 
 #include "velox/dwio/common/SelectiveColumnReaderInternal.h"
-#include "velox/functions/prestosql/types/TimestampWithTimeZoneType.h"
 #include "velox/dwio/parquet/reader/BooleanColumnReader.h"
 #include "velox/dwio/parquet/reader/FloatingPointColumnReader.h"
 #include "velox/dwio/parquet/reader/IntegerColumnReader.h"
@@ -30,7 +29,9 @@
 #include "velox/dwio/parquet/reader/StructColumnReader.h"
 #include "velox/dwio/parquet/reader/TimeColumnReader.h"
 #include "velox/dwio/parquet/reader/TimestampColumnReader.h"
+#include "velox/dwio/parquet/reader/VariantColumnReader.h"
 #include "velox/dwio/parquet/thrift/ParquetThrift.h"
+#include "velox/functions/prestosql/types/TimestampWithTimeZoneType.h"
 
 namespace facebook::velox::parquet {
 
@@ -109,6 +110,15 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
           requestedType, fileType, params, scanSpec);
 
     case TypeKind::ROW:
+      if (VariantColumnReader::isVariantAsJson(requestedType, *fileType)) {
+        return std::make_unique<VariantColumnReader>(
+            columnReaderOptions,
+            requestedType,
+            fileType,
+            params,
+            scanSpec,
+            pool);
+      }
       return std::make_unique<StructColumnReader>(
           columnReaderOptions, requestedType, fileType, params, scanSpec, pool);
 

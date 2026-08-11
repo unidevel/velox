@@ -26,6 +26,8 @@ velox_add_library(
   StructColumnReader.cpp
   StringColumnReader.cpp
   SemanticVersion.cpp
+  VariantColumnReader.cpp
+  VariantToJson.cpp
   HEADERS
   BooleanColumnReader.h
   BooleanDecoder.h
@@ -50,6 +52,8 @@ velox_add_library(
   StructColumnReader.h
   TimeColumnReader.h
   TimestampColumnReader.h
+  VariantColumnReader.h
+  VariantToJson.h
 )
 
 velox_link_libraries(

@@ -107,6 +107,19 @@ target_link_libraries(
   ${TEST_LINK_LIBS}
 )
 
+add_executable(velox_dwio_parquet_variant_to_json_test VariantToJsonTest.cpp)
+add_test(
+  NAME velox_dwio_parquet_variant_to_json_test
+  COMMAND velox_dwio_parquet_variant_to_json_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(
+  velox_dwio_parquet_variant_to_json_test
+  velox_dwio_native_parquet_reader
+  velox_link_libs
+  ${TEST_LINK_LIBS}
+)
+
 add_executable(velox_dwio_parquet_structure_decoder_test NestedStructureDecoderTest.cpp)
 add_test(
   NAME velox_dwio_parquet_structure_decoder_test
