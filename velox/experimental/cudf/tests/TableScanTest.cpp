@@ -31,10 +31,12 @@
 #include "velox/common/memory/MemoryArbitrator.h"
 #include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/common/testutil/TestValue.h"
+#include "velox/connectors/ConnectorRegistry.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/hive/HiveConnectorSplit.h"
 #include "velox/dwio/common/FileSink.h"
 #include "velox/dwio/common/tests/utils/DataFiles.h"
+#include "velox/dwio/parquet/RegisterParquetReader.h"
 #include "velox/dwio/parquet/writer/Writer.h"
 #include "velox/exec/Exchange.h"
 #include "velox/exec/PlanNodeStats.h"
@@ -1133,4 +1135,132 @@ TEST_F(TableScanTest, multiLevelNestedDecimalScan) {
                {makeNullableFlatVector<int32_t>({10, std::nullopt, 30}),
                 makeArrayVector({0, 2, 4}, listElements)})})});
   assertDecimalScanRoundTrip(vector, rowType);
+}
+
+// The plain Hive cuDF reader only reads columns stored in the Parquet file, so
+// scans that need partition or synthesized column values are kept on the CPU.
+TEST_F(TableScanTest, unsupportedHiveScanColumns) {
+  using HiveColumnHandle = facebook::velox::connector::hive::HiveColumnHandle;
+  const auto connector = std::dynamic_pointer_cast<
+      facebook::velox::cudf_velox::connector::hive::CudfHiveConnector>(
+      facebook::velox::connector::ConnectorRegistry::tryGet(
+          kCudfHiveConnectorId));
+  ASSERT_NE(connector, nullptr);
+  const auto makeHandle = [](const std::string& name,
+                             const TypePtr& type,
+                             HiveColumnHandle::ColumnType columnType =
+                                 HiveColumnHandle::ColumnType::kRegular) {
+    return std::make_shared<HiveColumnHandle>(
+        name,
+        columnType,
+        type,
+        type,
+        std::vector<facebook::velox::common::Subfield>{});
+  };
+  const auto dataColumns = ROW({"id", "name"}, {BIGINT(), VARCHAR()});
+  const auto makeTableHandle = [&](facebook::velox::common::SubfieldFilters
+                                       filters,
+                                   core::TypedExprPtr remainingFilter) {
+    return std::make_shared<facebook::velox::connector::hive::HiveTableHandle>(
+        kCudfHiveConnectorId,
+        "t",
+        std::move(filters),
+        std::move(remainingFilter),
+        dataColumns);
+  };
+  // Returns the column named in the fallback reason, or "" when supported.
+  const auto unsupportedColumn =
+      [&](const facebook::velox::connector::ConnectorTableHandlePtr& handle,
+          const facebook::velox::connector::ColumnHandleMap& assignments) {
+        const auto reason =
+            connector->unsupportedGpuScanReason(handle, assignments);
+        if (!reason.has_value()) {
+          return std::string();
+        }
+        const auto begin = reason->find('\'') + 1;
+        return reason->substr(begin, reason->rfind('\'') - begin);
+      };
+
+  facebook::velox::connector::ColumnHandleMap regular{
+      {"id", makeHandle("id", BIGINT())}};
+  EXPECT_EQ(unsupportedColumn(makeTableHandle({}, nullptr), regular), "");
+
+  // Projected partition key.
+  facebook::velox::connector::ColumnHandleMap withPartition{
+      {"id", makeHandle("id", BIGINT())},
+      {"ds",
+       makeHandle(
+           "ds", VARCHAR(), HiveColumnHandle::ColumnType::kPartitionKey)}};
+  EXPECT_EQ(
+      unsupportedColumn(makeTableHandle({}, nullptr), withPartition), "ds");
+
+  // Filter on a data column that is not projected is supported.
+  facebook::velox::common::SubfieldFilters dataFilter;
+  dataFilter[facebook::velox::common::Subfield("name")] =
+      std::make_unique<facebook::velox::common::IsNotNull>();
+  EXPECT_EQ(
+      unsupportedColumn(
+          makeTableHandle(std::move(dataFilter), nullptr), regular),
+      "");
+
+  // Filter-only column that is not a data column, i.e. a partition column.
+  facebook::velox::common::SubfieldFilters partitionFilter;
+  partitionFilter[facebook::velox::common::Subfield("ds")] =
+      std::make_unique<facebook::velox::common::IsNotNull>();
+  EXPECT_EQ(
+      unsupportedColumn(
+          makeTableHandle(std::move(partitionFilter), nullptr), regular),
+      "ds");
+
+  // Remaining filter referencing a partition column.
+  auto remainingFilter = std::make_shared<core::CallTypedExpr>(
+      BOOLEAN(),
+      "is_null",
+      std::make_shared<core::FieldAccessTypedExpr>(VARCHAR(), "ds"));
+  EXPECT_EQ(
+      unsupportedColumn(makeTableHandle({}, remainingFilter), regular), "ds");
+}
+
+TEST_F(TableScanTest, hivePartitionKeyScanFallsBackToCpu) {
+  // The scan runs on the CPU Hive data source, which needs the CPU Parquet
+  // reader that this cuDF test binary does not register by default.
+  facebook::velox::parquet::registerParquetReaderFactory();
+  SCOPE_EXIT {
+    facebook::velox::parquet::unregisterParquetReaderFactory();
+  };
+  auto data = makeRowVector({"id"}, {makeFlatVector<int64_t>({1, 2, 3})});
+  auto filePath = TempFilePath::create();
+  writeToFile(filePath->getPath(), data);
+
+  using HiveColumnHandle = facebook::velox::connector::hive::HiveColumnHandle;
+  facebook::velox::connector::ColumnHandleMap assignments{
+      {"id",
+       std::make_shared<HiveColumnHandle>(
+           "id", HiveColumnHandle::ColumnType::kRegular, BIGINT(), BIGINT())},
+      {"ds",
+       std::make_shared<HiveColumnHandle>(
+           "ds",
+           HiveColumnHandle::ColumnType::kPartitionKey,
+           VARCHAR(),
+           VARCHAR())}};
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .connectorId(kCudfHiveConnectorId)
+                  .outputType(ROW({"id", "ds"}, {BIGINT(), VARCHAR()}))
+                  .dataColumns(ROW({"id"}, {BIGINT()}))
+                  .assignments(assignments)
+                  .endTableScan()
+                  .planNode();
+  auto split = facebook::velox::connector::hive::HiveConnectorSplitBuilder(
+                   filePath->getPath())
+                   .connectorId(kCudfHiveConnectorId)
+                   .fileFormat(dwio::common::FileFormat::PARQUET)
+                   .partitionKey("ds", "2021-01-01")
+                   .build();
+  auto expected = makeRowVector(
+      {"id", "ds"},
+      {makeFlatVector<int64_t>({1, 2, 3}),
+       makeFlatVector<std::string>(
+           {"2021-01-01", "2021-01-01", "2021-01-01"})});
+  AssertQueryBuilder(plan).split(split).assertResults(expected);
 }

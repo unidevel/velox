@@ -16,6 +16,7 @@
 #pragma once
 
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConfig.h"
+#include "velox/experimental/cudf/connectors/hive/CudfTableScanSupport.h"
 
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/hive/iceberg/IcebergConnector.h"
@@ -29,12 +30,20 @@ using namespace facebook::velox::config;
 /// - Creates CudfIcebergDataSource instances for reading Iceberg tables with
 ///   support for delete files and schema evolution.
 class CudfIcebergConnector final
-    : public ::facebook::velox::connector::hive::HiveConnector {
+    : public ::facebook::velox::connector::hive::HiveConnector,
+      public CudfTableScanSupport {
  public:
   CudfIcebergConnector(
       const std::string& id,
       std::shared_ptr<const ConfigBase> config,
       folly::Executor* executor);
+
+  /// The cuDF Iceberg reader produces every Iceberg table scan.
+  std::optional<std::string> unsupportedGpuScanReason(
+      const ConnectorTableHandlePtr& /*tableHandle*/,
+      const ColumnHandleMap& /*assignments*/) const override {
+    return std::nullopt;
+  }
 
   /// Creates a CudfIcebergDataSource when reading from Iceberg tables when cudf
   /// is registered, otherwise falls back to the base IcebergDataSource.

@@ -12,30 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-if(NOT VELOX_DISABLE_GOOGLETEST)
-  add_executable(
-    velox_hive_delta_test
-    Main.cpp
-    HiveDeltaSplitTest.cpp
-    PartitionValueConversionTest.cpp
-    DeltaSplitReaderTest.cpp)
-
-  add_test(velox_hive_delta_test velox_hive_delta_test)
-
-  target_link_libraries(
-    velox_hive_delta_test
-    velox_hive_delta_splitreader
-    velox_hive_connector
-    velox_connector_registry
-    velox_dwio_common
+velox_add_cudf_test(
+  NAME velox_cudf_delta_read_test
+  SOURCES ../Main.cpp CudfDeltaReadTest.cpp
+  LIBS
+    velox_cudf_delta_connector
+    velox_cudf_exec_test_lib
+    velox_exec
     velox_exec_test_lib
-    velox_dwio_parquet_reader
-    velox_dwio_parquet_writer
-    velox_type
-    velox_vector
-    velox_memory
-    velox_core
-    GTest::gtest
-    ${TEST_LINK_LIBS}
-  )
-endif()
+    velox_test_util
+)

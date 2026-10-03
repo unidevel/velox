@@ -313,9 +313,16 @@ velox_add_cudf_test(
   LIBS ${CUDF_TEST_DEFAULT_LIBS} velox_window
 )
 
+add_subdirectory(delta)
 add_subdirectory(iceberg)
 add_subdirectory(utils)
 
 if(${VELOX_ENABLE_SPARK_FUNCTIONS})
   add_subdirectory(sparksql)
 endif()
+
+velox_add_cudf_test(
+  NAME velox_cudf_timestamp_with_time_zone_test
+  SOURCES Main.cpp TimestampWithTimeZoneTest.cpp
+  LIBS ${CUDF_TEST_DEFAULT_LIBS} velox_cudf_exec_test_lib
+)

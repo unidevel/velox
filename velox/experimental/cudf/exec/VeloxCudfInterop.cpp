@@ -213,6 +213,18 @@ void setArrowFormatBackToVarbinary(ArrowSchema* schema, const TypePtr& type) {
       }
       break;
     }
+    // ARRAY is walked too so that VARBINARY elements are restored, not only
+    // VARBINARY struct fields. Without this, reading an ARRAY<VARBINARY>
+    // column (e.g. Parquet binary arrays in Delta tables) imports as
+    // ARRAY<VARCHAR> and the cuDF-to-Velox conversion fails with a type
+    // mismatch.
+    case TypeKind::ARRAY: {
+      if (schema->n_children != 1) {
+        break;
+      }
+      setArrowFormatBackToVarbinary(schema->children[0], type->childAt(0));
+      break;
+    }
     case TypeKind::VARBINARY: {
       // Replace any format string with "z" to indicate VARBINARY.
       static constexpr const char* kVarbinaryArrowFormat = "z";
