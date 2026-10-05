@@ -18,8 +18,12 @@
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConnector.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveDataSource.h"
 #include "velox/experimental/cudf/exec/ToCudf.h"
+#include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
 
 #include "velox/connectors/hive/HiveDataSource.h"
+#include "velox/connectors/hive/TableHandle.h"
+
+#include <unordered_set>
 
 namespace facebook::velox::cudf_velox::connector::hive {
 
@@ -34,6 +38,58 @@ CudfHiveConnector::CudfHiveConnector(
   VLOG(1) << "cuDF Hive connector created";
 }
 
+std::optional<std::string> CudfHiveConnector::unsupportedGpuScanReason(
+    const ConnectorTableHandlePtr& tableHandle,
+    const ColumnHandleMap& assignments) const {
+  using HiveColumnHandle = ::facebook::velox::connector::hive::HiveColumnHandle;
+  const auto hiveTableHandle = std::dynamic_pointer_cast<
+      const ::facebook::velox::connector::hive::HiveTableHandle>(tableHandle);
+  if (hiveTableHandle == nullptr) {
+    return std::nullopt;
+  }
+  const auto unsupportedColumn = [](const std::string& name) {
+    return fmt::format(
+        "cuDF Hive reader does not support partition or synthesized column '{}'",
+        name);
+  };
+
+  std::unordered_set<std::string> regularColumns;
+  for (const auto& [_, columnHandle] : assignments) {
+    const auto* handle =
+        dynamic_cast<const HiveColumnHandle*>(columnHandle.get());
+    if (handle == nullptr) {
+      continue;
+    }
+    if (handle->columnType() != HiveColumnHandle::ColumnType::kRegular) {
+      return unsupportedColumn(handle->name());
+    }
+    regularColumns.insert(handle->name());
+  }
+
+  // Without dataColumns a missing filter column cannot be told apart from a
+  // data column, so only the assignments above can be checked.
+  const auto& dataColumns = hiveTableHandle->dataColumns();
+  if (dataColumns == nullptr) {
+    return std::nullopt;
+  }
+  const auto isFileColumn = [&](const std::string& name) {
+    return regularColumns.contains(name) || dataColumns->containsChild(name);
+  };
+  for (const auto& [subfield, _] : hiveTableHandle->subfieldFilters()) {
+    if (!isFileColumn(subfield.baseName())) {
+      return unsupportedColumn(subfield.baseName());
+    }
+  }
+  if (const auto& remainingFilter = hiveTableHandle->remainingFilter()) {
+    for (const auto& name : referencedInputFields(remainingFilter)) {
+      if (!isFileColumn(name)) {
+        return unsupportedColumn(name);
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 std::unique_ptr<DataSource> CudfHiveConnector::createDataSource(
     const RowTypePtr& outputType,
     const ConnectorTableHandlePtr& tableHandle,
@@ -44,7 +100,10 @@ std::unique_ptr<DataSource> CudfHiveConnector::createDataSource(
   // TODO (dm): Make this ^^^ happen
   // Problem: this information is in split, not table handle
 
-  if (cudfIsRegistered()) {
+  // A scan the cuDF reader cannot produce runs as a CPU TableScan (see
+  // CudfTableScanSupport) and needs the CPU data source.
+  if (cudfIsRegistered() &&
+      !unsupportedGpuScanReason(tableHandle, columnHandles).has_value()) {
     return std::make_unique<CudfHiveDataSource>(
         outputType,
         tableHandle,

@@ -13,27 +13,14 @@
 # limitations under the License.
 
 add_library(
-  velox_cudf_hive_connector
-  BufferedInputDataSource.cpp
-  CudfHiveConfig.cpp
-  CudfHiveConnector.cpp
-  CudfHiveConnectorSplit.cpp
-  CudfHiveDataSink.cpp
-  CudfHiveDataSource.cpp
-  CudfHiveTableHandle.cpp
-  CudfSplitReader.cpp
-  CudfSplitReaderByteFetch.cpp
+  velox_cudf_delta_connector
+  CudfDeltaConnector.cpp
+  CudfDeltaDataSource.cpp
+  CudfDeltaSplitReader.cpp
 )
 
 target_link_libraries(
-  velox_cudf_hive_connector
-  PRIVATE velox_common_io velox_dwio_common velox_hive_connector
-  PUBLIC cudf::cudf nvtx3::nvtx3-cpp velox_cudf_expression
+  velox_cudf_delta_connector
+  PRIVATE velox_hive_delta_splitreader velox_hive_connector
+  PUBLIC cudf::cudf velox_cudf_hive_connector
 )
-
-if(VELOX_ENABLE_ABFS)
-  target_link_libraries(velox_cudf_hive_connector PRIVATE velox_abfs)
-endif()
-
-add_subdirectory(delta)
-add_subdirectory(iceberg)

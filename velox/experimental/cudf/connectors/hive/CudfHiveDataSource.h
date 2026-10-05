@@ -122,6 +122,11 @@ class CudfHiveDataSource : public DataSource, public NvtxHelper {
   const RowTypePtr getTableRowType();
   RowTypePtr cachedTableRowType_{};
 
+  // Table-column names and types of the scan's own column handles, used to
+  // resolve read column types that are not data columns (e.g. partition
+  // columns of Delta tables).
+  RowTypePtr scanColumnsType_;
+
   memory::MemoryPool* const pool_;
 
   size_t completedRows_{0};

@@ -15,8 +15,7 @@
  */
 
 #include "velox/experimental/cudf/CudfConfig.h"
-#include "velox/experimental/cudf/connectors/hive/CudfHiveConnector.h"
-#include "velox/experimental/cudf/connectors/hive/iceberg/CudfIcebergConnector.h"
+#include "velox/experimental/cudf/connectors/hive/CudfTableScanSupport.h"
 #include "velox/experimental/cudf/exec/CudfAggregation.h"
 #include "velox/experimental/cudf/exec/CudfAssignUniqueId.h"
 #include "velox/experimental/cudf/exec/CudfBatchConcat.h"
@@ -129,23 +128,23 @@ class TableScanAdapter : public OperatorAdapter {
     }
     auto const& connector = velox::connector::ConnectorRegistry::tryGet(
         tableScanNode->tableHandle()->connectorId());
-    auto cudfHiveConnector = std::dynamic_pointer_cast<
-        facebook::velox::cudf_velox::connector::hive::CudfHiveConnector>(
-        connector);
-    auto cudfIcebergConnector =
-        std::dynamic_pointer_cast<facebook::velox::cudf_velox::connector::hive::
-                                      iceberg::CudfIcebergConnector>(connector);
-
-    bool canRunOnGPU =
-        cudfHiveConnector != nullptr or cudfIcebergConnector != nullptr;
-
-    if (!canRunOnGPU) {
+    // Every cuDF connector (Hive, Delta, Iceberg) reports whether its reader
+    // can produce the scan; other connectors have no cuDF reader.
+    const auto scanSupport =
+        std::dynamic_pointer_cast<const connector::hive::CudfTableScanSupport>(
+            connector);
+    if (scanSupport == nullptr) {
       LOG_FALLBACK(
-          "TableScan connector is not CudfHiveConnector or CudfIcebergConnector, PlanNode id: {}",
+          "TableScan connector has no cuDF reader, PlanNode id: {}",
           planNode->id());
+      return false;
     }
-
-    return canRunOnGPU;
+    if (const auto reason = scanSupport->unsupportedGpuScanReason(
+            tableScanNode->tableHandle(), tableScanNode->assignments())) {
+      LOG_FALLBACK("{}, PlanNode id: {}", reason.value(), planNode->id());
+      return false;
+    }
+    return true;
   }
 
   bool acceptsGpuInput() const override {

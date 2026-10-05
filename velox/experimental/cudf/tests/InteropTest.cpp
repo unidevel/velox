@@ -126,6 +126,21 @@ TEST_F(InteropTest, varbinary) {
   roundTrip(input);
 }
 
+// cuDF has no binary type, so VARBINARY travels as a STRING column and must be
+// restored on the way back, including inside arrays and structs.
+TEST_F(InteropTest, nestedVarbinary) {
+  auto elements = makeFlatVector<StringView>(
+      {"binary\x00data"_sv, "more"_sv, ""_sv, "x"_sv}, VARBINARY());
+  auto input = makeRowVector(
+      {"c0", "c1"},
+      {makeArrayVector({0, 2, 3}, elements),
+       makeRowVector(
+           {"f0"},
+           {makeFlatVector<StringView>(
+               {"a"_sv, "b\x00"_sv, ""_sv}, VARBINARY())})});
+  roundTrip(input);
+}
+
 // ========== With nulls ==========
 
 TEST_F(InteropTest, integerWithNulls) {
